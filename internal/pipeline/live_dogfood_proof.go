@@ -77,6 +77,11 @@ func readProofFile(proofsDir, name string) ([]byte, error) {
 	if !info.Mode().IsRegular() {
 		return nil, fmt.Errorf("proof file %s is not a regular file", name)
 	}
+	if proofFileTooLarge(info.Size()) {
+		// The manuscript copy drops files this large, so the proof would not
+		// travel with the marker into the published proofs directory.
+		return nil, fmt.Errorf("proof file %s is %d bytes; proofs must be under %d bytes to be published", name, info.Size(), publishableManuscriptMaxCaptureBytes)
+	}
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("proof file %s: %w", name, err)
@@ -85,6 +90,10 @@ func readProofFile(proofsDir, name string) ([]byte, error) {
 		return nil, fmt.Errorf("proof file %s is empty", name)
 	}
 	return data, nil
+}
+
+func proofFileTooLarge(size int64) bool {
+	return size >= publishableManuscriptMaxCaptureBytes
 }
 
 // liveDogfoodProofCoverage reports whether a novel feature without a live
@@ -158,12 +167,14 @@ func copyProofFiles(srcDir, dstDir string, covered []ProofCoveredFeature) error 
 		}
 		src := filepath.Join(srcDir, feature.Proof)
 		dst := filepath.Join(dstDir, feature.Proof)
-		if sameResolvedPath(src, dst) {
-			continue
-		}
 		info, err := os.Stat(src)
 		if err != nil {
 			errs = append(errs, err)
+			continue
+		}
+		// A symlinked proofs dir can make src and dst one file under two
+		// paths; copying would truncate the proof before reading it.
+		if dstInfo, err := os.Stat(dst); err == nil && os.SameFile(info, dstInfo) {
 			continue
 		}
 		if err := copyFile(src, dst, info.Mode().Perm()); err != nil {

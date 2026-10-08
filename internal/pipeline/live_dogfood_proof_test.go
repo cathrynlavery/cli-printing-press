@@ -310,6 +310,39 @@ func TestCopyProofFilesMirrorsReferencedProofs(t *testing.T) {
 	assert.Error(t, copyProofFiles(src, dst, []ProofCoveredFeature{{Command: "undo", Proof: "../escape.md"}}))
 }
 
+func TestCopyProofFilesSkipsSymlinkedSameFile(t *testing.T) {
+	t.Parallel()
+
+	runstateProofs := t.TempDir()
+	proof := filepath.Join(runstateProofs, "undo-lifecycle.md")
+	require.NoError(t, os.WriteFile(proof, []byte("$ cli undo batch-1 --yes (exit 0)\n"), 0o644))
+	acceptanceDir := filepath.Join(t.TempDir(), "proofs-link")
+	require.NoError(t, os.Symlink(runstateProofs, acceptanceDir))
+
+	require.NoError(t, copyProofFiles(acceptanceDir, runstateProofs, []ProofCoveredFeature{{Command: "undo", Proof: "undo-lifecycle.md"}}))
+	got, err := os.ReadFile(proof)
+	require.NoError(t, err)
+	assert.Equal(t, "$ cli undo batch-1 --yes (exit 0)\n", string(got), "copying a file onto itself must not truncate the proof")
+}
+
+func TestReadProofFileRejectsUnpublishableSize(t *testing.T) {
+	t.Parallel()
+
+	assert.False(t, proofFileTooLarge(publishableManuscriptMaxCaptureBytes-1))
+	assert.True(t, proofFileTooLarge(publishableManuscriptMaxCaptureBytes))
+
+	// A sparse file at the limit is rejected from its size alone, before
+	// anything is read.
+	dir := t.TempDir()
+	f, err := os.Create(filepath.Join(dir, "huge.md"))
+	require.NoError(t, err)
+	require.NoError(t, f.Truncate(publishableManuscriptMaxCaptureBytes))
+	require.NoError(t, f.Close())
+	_, err = readProofFile(dir, "huge.md")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "must be under")
+}
+
 func TestPublishableManuscriptCopyCarriesProofFilesWithMarker(t *testing.T) {
 	t.Parallel()
 
