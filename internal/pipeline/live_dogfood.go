@@ -1022,25 +1022,9 @@ func liveDogfoodPlaceholdersToResolve(command liveDogfoodCommand, happyArgs []st
 func liveDogfoodShorthandTypes(help string) map[byte]bool {
 	types := make(map[byte]bool)
 	for line := range strings.SplitSeq(extractFlagsSection(help), "\n") {
-		fields := strings.Fields(line)
-		if len(fields) == 0 {
-			continue
+		if decl, ok := parseLiveDogfoodFlagDecl(line); ok && decl.shorthand != 0 {
+			types[decl.shorthand] = decl.takesValue
 		}
-		shorthand := strings.TrimSuffix(fields[0], ",")
-		if len(shorthand) != 2 || shorthand[0] != '-' || shorthand[1] == '-' {
-			continue
-		}
-		takesValue := false
-		if strings.HasSuffix(fields[0], ",") && len(fields) > 1 && strings.HasPrefix(fields[1], "--") {
-			if _, value, ok := strings.Cut(fields[1], "="); ok {
-				takesValue = isLiveDogfoodFlagValueType(value)
-			} else if len(fields) > 2 {
-				takesValue = isLiveDogfoodFlagValueType(fields[2])
-			}
-		} else if len(fields) > 1 {
-			takesValue = isLiveDogfoodFlagValueType(fields[1])
-		}
-		types[shorthand[1]] = takesValue
 	}
 	return types
 }
@@ -3027,23 +3011,57 @@ func isLiveDogfoodFlagToken(arg string) bool {
 func liveDogfoodFlagValueNames(help string) map[string]struct{} {
 	valueFlags := make(map[string]struct{})
 	for line := range strings.SplitSeq(extractFlagsSection(help), "\n") {
-		fields := strings.Fields(line)
-		for i, field := range fields {
-			if !strings.HasPrefix(field, "--") {
-				continue
-			}
-			nameValue := strings.TrimPrefix(strings.TrimSuffix(field, ","), "--")
-			if name, value, ok := strings.Cut(nameValue, "="); ok {
-				if isLiveDogfoodFlagValueType(value) {
-					valueFlags[strings.ToLower(name)] = struct{}{}
-				}
-			} else if i+1 < len(fields) && isLiveDogfoodFlagValueType(fields[i+1]) {
-				valueFlags[strings.ToLower(nameValue)] = struct{}{}
-			}
-			break
+		decl, ok := parseLiveDogfoodFlagDecl(line)
+		if ok && decl.long != "" && decl.takesValue {
+			valueFlags[strings.ToLower(decl.long)] = struct{}{}
 		}
 	}
 	return valueFlags
+}
+
+// liveDogfoodFlagDecl is one Cobra help flag declaration.
+type liveDogfoodFlagDecl struct {
+	shorthand  byte // 0 when the flag has no shorthand
+	long       string
+	takesValue bool
+}
+
+// parseLiveDogfoodFlagDecl reads the declaration segment of a Cobra help
+// flag line: `-v, --name type`, then two or more spaces, then the usage
+// text. Only a type token inside that segment counts, so a description
+// that starts with a word like "String" never makes a boolean flag look
+// value-taking.
+func parseLiveDogfoodFlagDecl(line string) (liveDogfoodFlagDecl, bool) {
+	segment := strings.TrimSpace(line)
+	if gap := strings.Index(segment, "  "); gap >= 0 {
+		segment = segment[:gap]
+	}
+	fields := strings.Fields(segment)
+	if len(fields) == 0 || !strings.HasPrefix(fields[0], "-") {
+		return liveDogfoodFlagDecl{}, false
+	}
+	var decl liveDogfoodFlagDecl
+	i := 0
+	if short := strings.TrimSuffix(fields[0], ","); len(short) == 2 && short[0] == '-' && short[1] != '-' {
+		decl.shorthand = short[1]
+		i = 1
+	}
+	if i < len(fields) && strings.HasPrefix(fields[i], "--") {
+		name, value, hasValue := strings.Cut(strings.TrimPrefix(strings.TrimSuffix(fields[i], ","), "--"), "=")
+		decl.long = name
+		if hasValue {
+			decl.takesValue = isLiveDogfoodFlagValueType(value)
+			return decl, true
+		}
+		i++
+	}
+	if decl.shorthand == 0 && decl.long == "" {
+		return liveDogfoodFlagDecl{}, false
+	}
+	if i < len(fields) {
+		decl.takesValue = isLiveDogfoodFlagValueType(fields[i])
+	}
+	return decl, true
 }
 
 func liveDogfoodFlagNames(help string) map[string]struct{} {

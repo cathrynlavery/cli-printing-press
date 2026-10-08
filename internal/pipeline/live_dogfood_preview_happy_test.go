@@ -11,6 +11,48 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestLiveDogfoodConfirmFlagIgnoresTypeWordsInDescriptions(t *testing.T) {
+	t.Parallel()
+
+	// "String" in -v's description must not make the boolean -v look
+	// value-taking, or -vy would hide the -y that pflag sets.
+	help := "Flags:\n  -v, --verbose        String diagnostics\n  -q, --query string   Text\n  -y, --yes            Apply\n"
+	shorthands := liveDogfoodShorthandTypes(help)
+	assert.Equal(t, map[byte]bool{'v': false, 'q': true, 'y': false}, shorthands)
+	assert.Equal(t, "-vy", liveDogfoodConfirmFlag([]string{"tidy", "-vy"}, shorthands))
+	assert.Equal(t, "", liveDogfoodConfirmFlag([]string{"tidy", "-qy"}, shorthands))
+}
+
+func TestParseLiveDogfoodFlagDecl(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		line string
+		want liveDogfoodFlagDecl
+		ok   bool
+	}{
+		{line: "  -v, --verbose        String diagnostics", want: liveDogfoodFlagDecl{shorthand: 'v', long: "verbose"}, ok: true},
+		{line: "  -q, --query string   Text", want: liveDogfoodFlagDecl{shorthand: 'q', long: "query", takesValue: true}, ok: true},
+		{line: "      --limit int   Max rows", want: liveDogfoodFlagDecl{long: "limit", takesValue: true}, ok: true},
+		{line: "      --dry-run     Int preview only", want: liveDogfoodFlagDecl{long: "dry-run"}, ok: true},
+		{line: "  -l int   Max rows", want: liveDogfoodFlagDecl{shorthand: 'l', takesValue: true}, ok: true},
+		{line: "      --tags strings   Tags", want: liveDogfoodFlagDecl{long: "tags", takesValue: true}, ok: true},
+		{line: "                     continued description --other string", ok: false},
+		{line: "", ok: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.line, func(t *testing.T) {
+			t.Parallel()
+			got, ok := parseLiveDogfoodFlagDecl(tt.line)
+			assert.Equal(t, tt.ok, ok)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+
+	valueFlags := liveDogfoodFlagValueNames("Flags:\n      --dry-run     Int preview only\n      --limit int   Max rows\n")
+	assert.Equal(t, map[string]struct{}{"limit": {}}, valueFlags)
+}
+
 func TestLiveDogfoodConfirmFlag(t *testing.T) {
 	t.Parallel()
 
