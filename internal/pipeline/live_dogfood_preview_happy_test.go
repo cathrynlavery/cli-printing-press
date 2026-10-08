@@ -14,6 +14,9 @@ import (
 func TestLiveDogfoodConfirmFlag(t *testing.T) {
 	t.Parallel()
 
+	// -q takes a string value, -v is boolean, -y is the confirm flag.
+	help := "Flags:\n  -q, --query string   Query\n  -v, --verbose        Verbose\n  -y, --yes            Apply\n"
+	shorthands := liveDogfoodShorthandTypes(help)
 	tests := []struct {
 		name string
 		args []string
@@ -35,13 +38,18 @@ func TestLiveDogfoodConfirmFlag(t *testing.T) {
 		{name: "shorthand cluster starting with y", args: []string{"tidy", "-yv"}, want: "-yv"},
 		{name: "cluster with y set false", args: []string{"tidy", "-vy=false"}, want: ""},
 		{name: "cluster without y", args: []string{"tidy", "-vq"}, want: ""},
+		{name: "y inside an attached string value", args: []string{"tidy", "-qquery"}, want: ""},
+		{name: "y as the value of a string shorthand", args: []string{"tidy", "-qy"}, want: ""},
+		{name: "string shorthand mid-cluster takes the rest as its value", args: []string{"tidy", "-vqy"}, want: ""},
+		{name: "unknown shorthand is treated as boolean", args: []string{"tidy", "-zy"}, want: "-zy"},
+		{name: "y before a string shorthand confirms", args: []string{"tidy", "-yq", "x"}, want: "-yq"},
 		{name: "after terminator is not a flag", args: []string{"tidy", "--", "--yes"}, want: ""},
 		{name: "positional named like a flag value", args: []string{"tidy", "yes"}, want: ""},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			assert.Equal(t, tt.want, liveDogfoodConfirmFlag(tt.args))
+			assert.Equal(t, tt.want, liveDogfoodConfirmFlag(tt.args, shorthands))
 		})
 	}
 }

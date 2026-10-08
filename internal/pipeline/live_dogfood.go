@@ -1004,7 +1004,7 @@ func liveDogfoodPlaceholdersToResolve(command liveDogfoodCommand, happyArgs []st
 	for i, spec := range specs {
 		if spec.optional {
 			if supplied < 0 {
-				supplied = liveDogfoodSuppliedPositionalCount(happyArgs, command.Path, len(specs), liveDogfoodFlagValueNamesWithShorthands(command.Help))
+				supplied = liveDogfoodSuppliedPositionalCount(happyArgs, command.Path, len(specs), liveDogfoodFlagValueNames(command.Help), liveDogfoodShorthandTypes(command.Help))
 			}
 			if i >= supplied {
 				break
@@ -1015,39 +1015,63 @@ func liveDogfoodPlaceholdersToResolve(command liveDogfoodCommand, happyArgs []st
 	return names, len(specs)
 }
 
-// liveDogfoodFlagValueNamesWithShorthands extends liveDogfoodFlagValueNames
-// with the `-x` shorthand of each value-taking flag (help line
-// `-l, --limit int`), keyed with its dash so it never collides with a long
-// name, so `-l 5` consumes its value like `--limit 5`.
-func liveDogfoodFlagValueNamesWithShorthands(help string) map[string]struct{} {
-	valueFlags := liveDogfoodFlagValueNames(help)
+// liveDogfoodShorthandTypes maps each shorthand letter in help to whether it
+// takes a value (`-l, --limit int` or `-l int`) or is boolean
+// (`-v, --verbose`). Shorthands are case-sensitive, as in pflag, so `-v` and
+// `-V` stay distinct.
+func liveDogfoodShorthandTypes(help string) map[byte]bool {
+	types := make(map[byte]bool)
 	for line := range strings.SplitSeq(extractFlagsSection(help), "\n") {
 		fields := strings.Fields(line)
-		if len(fields) < 2 {
+		if len(fields) == 0 {
 			continue
 		}
 		shorthand := strings.TrimSuffix(fields[0], ",")
 		if len(shorthand) != 2 || shorthand[0] != '-' || shorthand[1] == '-' {
 			continue
 		}
-		long := strings.TrimPrefix(fields[1], "--")
-		if long == fields[1] {
+		takesValue := false
+		if strings.HasSuffix(fields[0], ",") && len(fields) > 1 && strings.HasPrefix(fields[1], "--") {
+			if _, value, ok := strings.Cut(fields[1], "="); ok {
+				takesValue = isLiveDogfoodFlagValueType(value)
+			} else if len(fields) > 2 {
+				takesValue = isLiveDogfoodFlagValueType(fields[2])
+			}
+		} else if len(fields) > 1 {
+			takesValue = isLiveDogfoodFlagValueType(fields[1])
+		}
+		types[shorthand[1]] = takesValue
+	}
+	return types
+}
+
+// liveDogfoodShorthandClusterValue reads a single-dash cluster the way pflag
+// does and reports whether its last value-taking shorthand reads the next
+// argument as its value. known is false when no letter appears in help.
+func liveDogfoodShorthandClusterValue(cluster string, shorthands map[byte]bool) (consumesNext, known bool) {
+	for i := 0; i < len(cluster); i++ {
+		c := cluster[i]
+		if c == '=' {
+			return false, known
+		}
+		takesValue, ok := shorthands[c]
+		if !ok {
 			continue
 		}
-		if name, _, ok := strings.Cut(long, "="); ok {
-			long = name
-		}
-		if _, ok := valueFlags[strings.ToLower(long)]; ok {
-			valueFlags[strings.ToLower(shorthand)] = struct{}{}
+		known = true
+		if takesValue {
+			// The rest of the token, if any, is the value.
+			return i == len(cluster)-1, true
 		}
 	}
-	return valueFlags
+	return false, known
 }
 
 // liveDogfoodSuppliedPositionalCount counts the positional values present in
 // happy args after the command path. Typed value flags consume their
-// separate value so `--limit 5` is not mistaken for a positional.
-func liveDogfoodSuppliedPositionalCount(happyArgs, commandPath []string, positionalCount int, valueFlags map[string]struct{}) int {
+// separate value so `--limit 5` and `-l 5` are not mistaken for positionals,
+// while a boolean shorthand such as `-V` leaves the next argument alone.
+func liveDogfoodSuppliedPositionalCount(happyArgs, commandPath []string, positionalCount int, valueFlags map[string]struct{}, shorthands map[byte]bool) int {
 	start := min(len(commandPath), len(happyArgs))
 	count := 0
 	afterTerminator := false
@@ -1058,6 +1082,15 @@ func liveDogfoodSuppliedPositionalCount(happyArgs, commandPath []string, positio
 			continue
 		}
 		if !afterTerminator && isLiveDogfoodFlagToken(arg) {
+			if cluster, short := strings.CutPrefix(arg, "-"); short && !strings.HasPrefix(cluster, "-") {
+				consumesNext, known := liveDogfoodShorthandClusterValue(cluster, shorthands)
+				if known {
+					if consumesNext && i+1 < len(happyArgs) && !isLiveDogfoodFlagToken(happyArgs[i+1]) {
+						i++
+					}
+					continue
+				}
+			}
 			if !strings.Contains(arg, "=") && liveDogfoodFlagHasSeparateValueWithTypes(happyArgs, start, i, positionalCount, valueFlags) {
 				i++
 			}
@@ -1907,7 +1940,7 @@ func runLiveDogfoodCommand(command liveDogfoodCommand, ctx resolveCtx) []LiveDog
 			break
 		}
 		if previewHappy {
-			if flag := liveDogfoodConfirmFlag(happyArgs); flag != "" {
+			if flag := liveDogfoodConfirmFlag(happyArgs, liveDogfoodShorthandTypes(command.Help)); flag != "" {
 				results = append(results,
 					failedLiveDogfoodResult(commandName, LiveDogfoodTestHappy, happyArgs, fmt.Sprintf("%s: %s", reasonPreviewHappyConfirmFlag, flag)),
 					skippedLiveDogfoodResult(commandName, LiveDogfoodTestJSON, reasonPreviewHappyConfirmFlag),
@@ -2451,8 +2484,9 @@ var liveDogfoodConfirmFlags = map[string]bool{
 // liveDogfoodConfirmFlag returns the first argument that enables a confirm
 // flag, or "". An explicit false value (`--yes=false`, `-y=false`) does not
 // confirm. Single-dash tokens follow pflag shorthand clustering, so `-vy`
-// and `-yy` both enable `-y`.
-func liveDogfoodConfirmFlag(args []string) string {
+// and `-yy` both enable `-y`, while `-qy` with a value-taking `-q` only sets
+// `-q` to "y".
+func liveDogfoodConfirmFlag(args []string, shorthands map[byte]bool) string {
 	for _, arg := range args {
 		if arg == "--" {
 			return ""
@@ -2467,7 +2501,7 @@ func liveDogfoodConfirmFlag(args []string) string {
 			}
 			continue
 		}
-		if liveDogfoodShorthandClusterConfirms(strings.TrimPrefix(arg, "-")) {
+		if liveDogfoodShorthandClusterConfirms(strings.TrimPrefix(arg, "-"), shorthands) {
 			return arg
 		}
 	}
@@ -2475,15 +2509,20 @@ func liveDogfoodConfirmFlag(args []string) string {
 }
 
 // liveDogfoodShorthandClusterConfirms reads a shorthand cluster the way pflag
-// does: `-abc` sets each letter, and `-ab=v` gives the value to the letter
-// right before `=`.
-func liveDogfoodShorthandClusterConfirms(cluster string) bool {
+// does: `-abc` sets each letter, `-ab=v` gives the value to the letter right
+// before `=`, and a value-taking letter takes the rest of the token as its
+// value. Letters missing from help are treated as boolean, which keeps
+// scanning and errs toward refusing.
+func liveDogfoodShorthandClusterConfirms(cluster string, shorthands map[byte]bool) bool {
 	for i := 0; i < len(cluster); i++ {
 		c := cluster[i]
 		if c == '=' {
 			return false
 		}
 		if !liveDogfoodConfirmFlags[strings.ToLower(string(c))] {
+			if shorthands[c] {
+				return false
+			}
 			continue
 		}
 		if i+1 < len(cluster) && cluster[i+1] == '=' && liveDogfoodFalseFlagValue(cluster[i+2:]) {

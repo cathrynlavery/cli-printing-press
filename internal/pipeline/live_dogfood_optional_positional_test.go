@@ -114,6 +114,25 @@ func TestLiveDogfoodPlaceholdersToResolve(t *testing.T) {
 	}
 }
 
+func TestLiveDogfoodPlaceholdersToResolveShorthandsAreCaseSensitive(t *testing.T) {
+	t.Parallel()
+
+	// -v takes a value and -V is boolean; folding case would make -V eat
+	// the positional that follows it.
+	cmd := liveDogfoodCommand{
+		Path: []string{"journal"},
+		Help: "Usage:\n  cli journal [batch-id] [flags]\n\nFlags:\n  -v, --view string   View\n  -V, --verbose       Verbose\n",
+	}
+	got, _ := liveDogfoodPlaceholdersToResolve(cmd, []string{"journal", "-V", "batch-1"})
+	assert.Equal(t, []string{"batch-id"}, got, "batch-1 is the positional after a boolean -V")
+
+	got, _ = liveDogfoodPlaceholdersToResolve(cmd, []string{"journal", "-v", "table"})
+	assert.Empty(t, got, "table is the value of -v, not a positional")
+
+	got, _ = liveDogfoodPlaceholdersToResolve(cmd, []string{"journal", "-Vv", "table"})
+	assert.Empty(t, got, "a cluster ending in a value shorthand reads the next argument")
+}
+
 func TestResolveCommandPositionalsKeepsUsageDepthWhenOptionalTailDropped(t *testing.T) {
 	t.Parallel()
 
