@@ -95,7 +95,7 @@ Flags:
 			}
 			args, ok, parsed := liveDogfoodHappyArgsParsed(cmd)
 			require.True(t, ok)
-			assert.Equal(t, tt.want, happyPathSyntheticParamFixtureSkip(cmd, args, parsed))
+			assert.Equal(t, tt.want, happyPathSyntheticParamFixtureSkip(cmd, args, parsed, false))
 		})
 	}
 }

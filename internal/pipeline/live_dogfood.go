@@ -1035,8 +1035,10 @@ func liveDogfoodSuppliedPositionalCount(happyArgs, commandPath []string, positio
 	return count
 }
 
-func happyPathSyntheticParamFixtureSkip(command liveDogfoodCommand, args []string, declared happyArgs) string {
-	if liveDogfoodCommandMutates(command) {
+// runsReal marks a mutating command whose happy path skips --dry-run, so a
+// placeholder would reach the API exactly as it would for a read.
+func happyPathSyntheticParamFixtureSkip(command liveDogfoodCommand, args []string, declared happyArgs, runsReal bool) string {
+	if liveDogfoodCommandMutates(command) && !runsReal {
 		return ""
 	}
 	if !happyArgsContainSyntheticFlagPlaceholder(args, command.Path) &&
@@ -1715,7 +1717,11 @@ func runLiveDogfoodCommand(command liveDogfoodCommand, ctx resolveCtx) []LiveDog
 	// the operator opts in per run with --allow-destructive. Either alone
 	// keeps the default dry-run behavior.
 	liveHappy := mutating && ctx.allowDestructive && annotationIsTrueValue(command.Annotations[liveHappyPathAnnotation])
-	if liveHappy {
+	// A preview happy path writes nothing without its confirm flag, so it
+	// runs for real without the matrix-wide --allow-destructive. The
+	// destructive-at-auth short-circuit above still applies.
+	previewHappy := mutating && !liveHappy && annotationIsTrueValue(command.Annotations[previewHappyPathAnnotation])
+	if liveHappy || previewHappy {
 		useDryRun = false
 	}
 	appendDryRunJSON := func(args []string, argsOK bool, stdin []byte, skipReason string) {
@@ -1822,7 +1828,7 @@ func runLiveDogfoodCommand(command liveDogfoodCommand, ctx resolveCtx) []LiveDog
 	resolvedArgs, resolveSkipped, resolveReason, fixtureSource := resolveCommandPositionals(command, happyArgs, len(parsedHappyArgs.positionals), ctx)
 	syntheticParamSkip := ""
 	if fixtureSkip == "" && !resolveSkipped {
-		syntheticParamSkip = happyPathSyntheticParamFixtureSkip(command, resolvedArgs, parsedHappyArgs)
+		syntheticParamSkip = happyPathSyntheticParamFixtureSkip(command, resolvedArgs, parsedHappyArgs, previewHappy)
 	}
 	switch {
 	case bodyFixtureSkip != "":
@@ -1845,7 +1851,7 @@ func runLiveDogfoodCommand(command liveDogfoodCommand, ctx resolveCtx) []LiveDog
 			skippedLiveDogfoodResult(commandName, LiveDogfoodTestHappy, syntheticParamSkip),
 			skippedLiveDogfoodResult(commandName, LiveDogfoodTestJSON, syntheticParamSkip),
 		)
-	case mutation.unclassified && !useDryRun && !liveHappy:
+	case mutation.unclassified && !useDryRun && !liveHappy && !previewHappy:
 		results = append(results,
 			skippedLiveDogfoodResult(commandName, LiveDogfoodTestHappy, reasonUnclassifiedNoMethod),
 			skippedLiveDogfoodResult(commandName, LiveDogfoodTestJSON, reasonUnclassifiedNoMethod),
@@ -1860,16 +1866,25 @@ func runLiveDogfoodCommand(command liveDogfoodCommand, ctx resolveCtx) []LiveDog
 		// preview. Stdin fixtures are curated request bodies, so they still
 		// run; missing-example / no-stdin / resolve skips above stay more
 		// specific. error_path keeps its own mutating skip after the switch.
-		if mutating && !useDryRun && !ctx.allowDestructive && !mutation.unclassified && len(stdinPayload) == 0 {
+		if mutating && !useDryRun && !ctx.allowDestructive && !previewHappy && !mutation.unclassified && len(stdinPayload) == 0 {
 			results = append(results,
 				skippedLiveDogfoodResult(commandName, LiveDogfoodTestHappy, reasonMutatingRequiresAllowDestructive),
 				skippedLiveDogfoodResult(commandName, LiveDogfoodTestJSON, reasonMutatingRequiresAllowDestructive),
 			)
 			break
 		}
+		if previewHappy {
+			if flag := liveDogfoodConfirmFlag(happyArgs); flag != "" {
+				results = append(results,
+					failedLiveDogfoodResult(commandName, LiveDogfoodTestHappy, happyArgs, fmt.Sprintf("%s: %s", reasonPreviewHappyConfirmFlag, flag)),
+					skippedLiveDogfoodResult(commandName, LiveDogfoodTestJSON, reasonPreviewHappyConfirmFlag),
+				)
+				break
+			}
+		}
 
 		runArgs := happyArgs
-		realOptIn := annotationIsTrueValue(command.Annotations[liveHappyPathAnnotation]) && !useDryRun
+		realOptIn := (annotationIsTrueValue(command.Annotations[liveHappyPathAnnotation]) && !useDryRun) || previewHappy
 		if useDryRun {
 			runArgs = appendDryRunArg(happyArgs)
 		} else if realOptIn {
@@ -2382,9 +2397,48 @@ const (
 	// Paid generations and local writes deliver value only as a side effect,
 	// so dry-run alone leaves them as hollow coverage forever; this lets the
 	// operator approve one real run (together with --allow-destructive).
-	liveHappyPathAnnotation   = "pp:live-happy-path"
-	liveDogfoodMaxOutputBytes = 10 << 20
+	liveHappyPathAnnotation = "pp:live-happy-path"
+	// A mutating command whose default run only previews (it writes only
+	// behind a confirm flag) declares this so its happy path runs for real,
+	// without --dry-run and without the matrix-wide --allow-destructive.
+	previewHappyPathAnnotation = "pp:preview-happy-path"
+	liveDogfoodMaxOutputBytes  = 10 << 20
 )
+
+const reasonPreviewHappyConfirmFlag = "preview happy path must not pass a confirm flag"
+
+// liveDogfoodConfirmFlags are the flags that turn a preview-by-default
+// command into a real write. A preview happy path carrying one of them
+// would write without operator approval.
+var liveDogfoodConfirmFlags = map[string]bool{
+	"yes": true, "y": true, "confirm": true, "force": true,
+	"execute": true, "apply": true, "send": true, "launch": true,
+}
+
+// liveDogfoodConfirmFlag returns the first confirm flag that happy args
+// enable, or "". An explicit false value (`--yes=false`) does not confirm.
+func liveDogfoodConfirmFlag(args []string) string {
+	for _, arg := range args {
+		if arg == "--" {
+			return ""
+		}
+		if !isLiveDogfoodFlagToken(arg) {
+			continue
+		}
+		name, value, hasValue := strings.Cut(strings.TrimLeft(arg, "-"), "=")
+		if !liveDogfoodConfirmFlags[strings.ToLower(name)] {
+			continue
+		}
+		if hasValue {
+			switch strings.ToLower(strings.TrimSpace(value)) {
+			case "false", "0", "no":
+				continue
+			}
+		}
+		return arg
+	}
+	return ""
+}
 
 var liveDogfoodRequiredParamFixturePhrases = []string{
 	"missing parameter",
