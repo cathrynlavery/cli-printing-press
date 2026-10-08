@@ -875,7 +875,7 @@ func resolveCommandPositionals(command liveDogfoodCommand, happyArgs []string, a
 	if annotatedPositionals > 0 {
 		return happyArgs, false, "", ""
 	}
-	placeholders := extractPositionalPlaceholders(liveDogfoodUsageSuffix(command.Help))
+	placeholders := liveDogfoodPlaceholdersToResolve(command, happyArgs)
 	if len(placeholders) == 0 {
 		return happyArgs, false, "", ""
 	}
@@ -983,6 +983,56 @@ func resolveCommandPositionals(command liveDogfoodCommand, happyArgs []string, a
 		fixtureSource = "store"
 	}
 	return substitutePositionals(happyArgs, command.Path, resolved), false, "", fixtureSource
+}
+
+// liveDogfoodPlaceholdersToResolve returns the Usage positionals that need a
+// fixture id. An optional positional (`[name]`) that the happy args leave
+// empty is dropped along with every later one, so the command runs as its
+// Example wrote it instead of requiring a list-companion lookup it never
+// asked for. Required positionals (`<name>`) always resolve.
+func liveDogfoodPlaceholdersToResolve(command liveDogfoodCommand, happyArgs []string) []string {
+	specs := extractPositionalPlaceholderSpecs(liveDogfoodUsageSuffix(command.Help))
+	if len(specs) == 0 {
+		return nil
+	}
+	supplied := -1
+	names := make([]string, 0, len(specs))
+	for i, spec := range specs {
+		if spec.optional {
+			if supplied < 0 {
+				supplied = liveDogfoodSuppliedPositionalCount(happyArgs, command.Path, len(specs), liveDogfoodFlagValueNames(command.Help))
+			}
+			if i >= supplied {
+				break
+			}
+		}
+		names = append(names, spec.name)
+	}
+	return names
+}
+
+// liveDogfoodSuppliedPositionalCount counts the positional values present in
+// happy args after the command path. Typed value flags consume their
+// separate value so `--limit 5` is not mistaken for a positional.
+func liveDogfoodSuppliedPositionalCount(happyArgs, commandPath []string, positionalCount int, valueFlags map[string]struct{}) int {
+	start := min(len(commandPath), len(happyArgs))
+	count := 0
+	afterTerminator := false
+	for i := start; i < len(happyArgs); i++ {
+		arg := happyArgs[i]
+		if arg == "--" && !afterTerminator {
+			afterTerminator = true
+			continue
+		}
+		if !afterTerminator && isLiveDogfoodFlagToken(arg) {
+			if !strings.Contains(arg, "=") && liveDogfoodFlagHasSeparateValueWithTypes(happyArgs, start, i, positionalCount, valueFlags) {
+				i++
+			}
+			continue
+		}
+		count++
+	}
+	return count
 }
 
 func happyPathSyntheticParamFixtureSkip(command liveDogfoodCommand, args []string, declared happyArgs) string {
