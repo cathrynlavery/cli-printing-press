@@ -875,18 +875,21 @@ func resolveCommandPositionals(command liveDogfoodCommand, happyArgs []string, a
 	if annotatedPositionals > 0 {
 		return happyArgs, false, "", ""
 	}
-	placeholders := liveDogfoodPlaceholdersToResolve(command, happyArgs)
+	placeholders, usageDepth := liveDogfoodPlaceholdersToResolve(command, happyArgs)
 	if len(placeholders) == 0 {
 		return happyArgs, false, "", ""
 	}
 
 	pathLen := len(command.Path)
 	nPlaceholders := len(placeholders)
-	if pathLen < nPlaceholders {
+	// usageDepth counts every Usage positional, including an optional tail
+	// that is not resolved, so each resolved placeholder keeps the parent
+	// path its position in Usage implies.
+	if pathLen < usageDepth {
 		// More placeholders than path segments before the verb. Unusual
 		// shape (top-level command with multiple positionals); skip.
 		return nil, true, fmt.Sprintf(
-			"command path %v has fewer segments than placeholders (%d)", command.Path, nPlaceholders), ""
+			"command path %v has fewer segments than placeholders (%d)", command.Path, usageDepth), ""
 	}
 
 	resolved := make([]string, 0, nPlaceholders)
@@ -902,7 +905,7 @@ func resolveCommandPositionals(command liveDogfoodCommand, happyArgs []string, a
 		}
 
 		// parent path of the verb that expects this placeholder.
-		parentPath := command.Path[:pathLen-nPlaceholders+i]
+		parentPath := command.Path[:pathLen-usageDepth+i]
 		siblingKey := strings.Join(parentPath, " ")
 		listCmd := findListCompanion(ctx.siblings[siblingKey])
 		if listCmd == nil {
@@ -913,7 +916,7 @@ func resolveCommandPositionals(command liveDogfoodCommand, happyArgs []string, a
 			} else if storeAvailable {
 				return nil, true, reasonRequiredParamFixture, ""
 			}
-			if liveDogfoodSyntheticPositionalValue(happyArgs, command.Path, i, nPlaceholders) {
+			if liveDogfoodSyntheticPositionalValue(happyArgs, command.Path, i, usageDepth) {
 				return nil, true, reasonRequiredParamFixture, ""
 			}
 			return nil, true, fmt.Sprintf("no list companion at depth %d for %q", i, name), ""
@@ -986,21 +989,22 @@ func resolveCommandPositionals(command liveDogfoodCommand, happyArgs []string, a
 }
 
 // liveDogfoodPlaceholdersToResolve returns the Usage positionals that need a
-// fixture id. An optional positional (`[name]`) that the happy args leave
-// empty is dropped along with every later one, so the command runs as its
-// Example wrote it instead of requiring a list-companion lookup it never
-// asked for. Required positionals (`<name>`) always resolve.
-func liveDogfoodPlaceholdersToResolve(command liveDogfoodCommand, happyArgs []string) []string {
+// fixture id, plus the full Usage positional count. An optional positional
+// (`[name]`) that the happy args leave empty is dropped along with every
+// later one, so the command runs as its Example wrote it instead of
+// requiring a list-companion lookup it never asked for. Required positionals
+// (`<name>`) always resolve.
+func liveDogfoodPlaceholdersToResolve(command liveDogfoodCommand, happyArgs []string) ([]string, int) {
 	specs := extractPositionalPlaceholderSpecs(liveDogfoodUsageSuffix(command.Help))
 	if len(specs) == 0 {
-		return nil
+		return nil, 0
 	}
 	supplied := -1
 	names := make([]string, 0, len(specs))
 	for i, spec := range specs {
 		if spec.optional {
 			if supplied < 0 {
-				supplied = liveDogfoodSuppliedPositionalCount(happyArgs, command.Path, len(specs), liveDogfoodFlagValueNames(command.Help))
+				supplied = liveDogfoodSuppliedPositionalCount(happyArgs, command.Path, len(specs), liveDogfoodFlagValueNamesWithShorthands(command.Help))
 			}
 			if i >= supplied {
 				break
@@ -1008,7 +1012,36 @@ func liveDogfoodPlaceholdersToResolve(command liveDogfoodCommand, happyArgs []st
 		}
 		names = append(names, spec.name)
 	}
-	return names
+	return names, len(specs)
+}
+
+// liveDogfoodFlagValueNamesWithShorthands extends liveDogfoodFlagValueNames
+// with the `-x` shorthand of each value-taking flag (help line
+// `-l, --limit int`), keyed with its dash so it never collides with a long
+// name, so `-l 5` consumes its value like `--limit 5`.
+func liveDogfoodFlagValueNamesWithShorthands(help string) map[string]struct{} {
+	valueFlags := liveDogfoodFlagValueNames(help)
+	for line := range strings.SplitSeq(extractFlagsSection(help), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			continue
+		}
+		shorthand := strings.TrimSuffix(fields[0], ",")
+		if len(shorthand) != 2 || shorthand[0] != '-' || shorthand[1] == '-' {
+			continue
+		}
+		long := strings.TrimPrefix(fields[1], "--")
+		if long == fields[1] {
+			continue
+		}
+		if name, _, ok := strings.Cut(long, "="); ok {
+			long = name
+		}
+		if _, ok := valueFlags[strings.ToLower(long)]; ok {
+			valueFlags[strings.ToLower(shorthand)] = struct{}{}
+		}
+	}
+	return valueFlags
 }
 
 // liveDogfoodSuppliedPositionalCount counts the positional values present in
@@ -2415,8 +2448,10 @@ var liveDogfoodConfirmFlags = map[string]bool{
 	"execute": true, "apply": true, "send": true, "launch": true,
 }
 
-// liveDogfoodConfirmFlag returns the first confirm flag that happy args
-// enable, or "". An explicit false value (`--yes=false`) does not confirm.
+// liveDogfoodConfirmFlag returns the first argument that enables a confirm
+// flag, or "". An explicit false value (`--yes=false`, `-y=false`) does not
+// confirm. Single-dash tokens follow pflag shorthand clustering, so `-vy`
+// and `-yy` both enable `-y`.
 func liveDogfoodConfirmFlag(args []string) string {
 	for _, arg := range args {
 		if arg == "--" {
@@ -2425,19 +2460,47 @@ func liveDogfoodConfirmFlag(args []string) string {
 		if !isLiveDogfoodFlagToken(arg) {
 			continue
 		}
-		name, value, hasValue := strings.Cut(strings.TrimLeft(arg, "-"), "=")
-		if !liveDogfoodConfirmFlags[strings.ToLower(name)] {
+		if long, ok := strings.CutPrefix(arg, "--"); ok {
+			name, value, hasValue := strings.Cut(long, "=")
+			if liveDogfoodConfirmFlags[strings.ToLower(name)] && (!hasValue || !liveDogfoodFalseFlagValue(value)) {
+				return arg
+			}
 			continue
 		}
-		if hasValue {
-			switch strings.ToLower(strings.TrimSpace(value)) {
-			case "false", "0", "no":
-				continue
-			}
+		if liveDogfoodShorthandClusterConfirms(strings.TrimPrefix(arg, "-")) {
+			return arg
 		}
-		return arg
 	}
 	return ""
+}
+
+// liveDogfoodShorthandClusterConfirms reads a shorthand cluster the way pflag
+// does: `-abc` sets each letter, and `-ab=v` gives the value to the letter
+// right before `=`.
+func liveDogfoodShorthandClusterConfirms(cluster string) bool {
+	for i := 0; i < len(cluster); i++ {
+		c := cluster[i]
+		if c == '=' {
+			return false
+		}
+		if !liveDogfoodConfirmFlags[strings.ToLower(string(c))] {
+			continue
+		}
+		if i+1 < len(cluster) && cluster[i+1] == '=' && liveDogfoodFalseFlagValue(cluster[i+2:]) {
+			return false
+		}
+		return true
+	}
+	return false
+}
+
+func liveDogfoodFalseFlagValue(value string) bool {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "false", "0", "no":
+		return true
+	default:
+		return false
+	}
 }
 
 var liveDogfoodRequiredParamFixturePhrases = []string{

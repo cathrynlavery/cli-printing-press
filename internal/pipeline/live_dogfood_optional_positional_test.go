@@ -1,6 +1,7 @@
 package pipeline
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -39,7 +40,7 @@ func TestLiveDogfoodPlaceholdersToResolve(t *testing.T) {
 	t.Parallel()
 
 	help := func(usage string) string {
-		return "Usage:\n  cli " + usage + "\n\nFlags:\n      --agent       Agent mode\n      --limit int   Max rows\n"
+		return "Usage:\n  cli " + usage + "\n\nFlags:\n      --agent       Agent mode\n  -l, --limit int   Max rows\n  -v, --verbose     Verbose\n"
 	}
 	tests := []struct {
 		name      string
@@ -47,6 +48,7 @@ func TestLiveDogfoodPlaceholdersToResolve(t *testing.T) {
 		usage     string
 		happyArgs []string
 		want      []string
+		wantDepth int
 	}{
 		{
 			name:      "optional positional absent from example is not resolved",
@@ -54,6 +56,23 @@ func TestLiveDogfoodPlaceholdersToResolve(t *testing.T) {
 			usage:     "journal [batch-id] [flags]",
 			happyArgs: []string{"journal", "--agent", "--limit", "5"},
 			want:      []string{},
+			wantDepth: 1,
+		},
+		{
+			name:      "shorthand value flag does not count as a positional",
+			path:      []string{"journal"},
+			usage:     "journal [batch-id] [flags]",
+			happyArgs: []string{"journal", "-l", "5"},
+			want:      []string{},
+			wantDepth: 1,
+		},
+		{
+			name:      "boolean shorthand before a positional keeps the positional",
+			path:      []string{"journal"},
+			usage:     "journal [batch-id] [flags]",
+			happyArgs: []string{"journal", "-v", "batch-1"},
+			want:      []string{"batch-id"},
+			wantDepth: 1,
 		},
 		{
 			name:      "optional positional supplied by example still resolves",
@@ -61,6 +80,7 @@ func TestLiveDogfoodPlaceholdersToResolve(t *testing.T) {
 			usage:     "journal [batch-id] [flags]",
 			happyArgs: []string{"journal", "batch-1", "--limit", "5"},
 			want:      []string{"batch-id"},
+			wantDepth: 1,
 		},
 		{
 			name:      "required positional always resolves",
@@ -68,6 +88,7 @@ func TestLiveDogfoodPlaceholdersToResolve(t *testing.T) {
 			usage:     "undo <batch-id> [flags]",
 			happyArgs: []string{"undo", "--limit", "5"},
 			want:      []string{"batch-id"},
+			wantDepth: 1,
 		},
 		{
 			name:      "trailing optional dropped after required",
@@ -75,13 +96,15 @@ func TestLiveDogfoodPlaceholdersToResolve(t *testing.T) {
 			usage:     "widgets get <id> [field] [flags]",
 			happyArgs: []string{"widgets", "get", "w-1"},
 			want:      []string{"id"},
+			wantDepth: 2,
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			cmd := liveDogfoodCommand{Path: tt.path, Help: help(tt.usage)}
-			got := liveDogfoodPlaceholdersToResolve(cmd, tt.happyArgs)
+			got, depth := liveDogfoodPlaceholdersToResolve(cmd, tt.happyArgs)
+			assert.Equal(t, tt.wantDepth, depth, "depth always counts every Usage positional")
 			if len(tt.want) == 0 {
 				assert.Empty(t, got)
 				return
@@ -89,6 +112,34 @@ func TestLiveDogfoodPlaceholdersToResolve(t *testing.T) {
 			assert.Equal(t, tt.want, got)
 		})
 	}
+}
+
+func TestResolveCommandPositionalsKeepsUsageDepthWhenOptionalTailDropped(t *testing.T) {
+	t.Parallel()
+
+	// Both companions are pre-cached so no subprocess runs. With the full
+	// Usage depth, <project-id> resolves from `projects list`; a shortened
+	// depth would wrongly ask `projects tasks list` instead.
+	ctx := resolveCtx{
+		siblings: map[string][]liveDogfoodCommand{
+			"projects":       {{Path: []string{"projects", "list"}}},
+			"projects tasks": {{Path: []string{"projects", "tasks", "list"}}},
+		},
+		cache:   newCompanionCache(),
+		timeout: time.Second,
+	}
+	ctx.cache.helps["projects list"] = ""
+	ctx.cache.helps["projects tasks list"] = ""
+	ctx.cache.results[strings.Join([]string{"projects", "list", "--json"}, "\x00")] = "P1"
+	ctx.cache.results[strings.Join([]string{"projects", "tasks", "list", "--json"}, "\x00")] = "T1"
+
+	cmd := liveDogfoodCommand{
+		Path: []string{"projects", "tasks", "get"},
+		Help: "Usage:\n  cli projects tasks get <project-id> [task-id] [flags]\n",
+	}
+	args, skipped, reason, _ := resolveCommandPositionals(cmd, []string{"projects", "tasks", "get", "project-1"}, 0, ctx)
+	require.False(t, skipped, reason)
+	assert.Equal(t, []string{"projects", "tasks", "get", "P1"}, args)
 }
 
 func TestRunLiveDogfoodOptionalPositionalRunsExampleWithoutCompanion(t *testing.T) {
@@ -112,7 +163,7 @@ fi
 if [ "${2:-}" = "--help" ]; then
   case "$1" in
     index) usage="index"; example="index --json" ;;
-    journal) usage="journal [batch-id]"; example="journal --agent --limit 5" ;;
+    journal) usage="journal [batch-id]"; example="journal --agent -l 5" ;;
     replay) usage="replay <batch-id>"; example="replay batch-1" ;;
   esac
   cat <<HELP
@@ -126,7 +177,7 @@ Examples:
 
 Flags:
       --agent       Agent mode
-      --limit int   Max rows
+  -l, --limit int   Max rows
       --json        Output JSON
 HELP
   exit 0
@@ -150,8 +201,8 @@ exit 0
 	journal := findResultByCommandKind(report, "journal", LiveDogfoodTestHappy)
 	require.NotNil(t, journal)
 	assert.Equal(t, LiveDogfoodStatusPass, journal.Status, journal.Reason)
-	assert.Equal(t, []string{"journal", "--agent", "--limit", "5"}, journal.Args,
-		"the optional positional runs the Example as written")
+	assert.Equal(t, []string{"journal", "--agent", "-l", "5"}, journal.Args,
+		"the optional positional runs the Example as written, shorthand value flag included")
 
 	// A required positional keeps companion resolution and its honest skip.
 	replay := findResultByCommandKind(report, "replay", LiveDogfoodTestHappy)

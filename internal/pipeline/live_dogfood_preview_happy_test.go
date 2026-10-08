@@ -29,6 +29,12 @@ func TestLiveDogfoodConfirmFlag(t *testing.T) {
 		{name: "send", args: []string{"tidy", "--send"}, want: "--send"},
 		{name: "launch", args: []string{"tidy", "--launch"}, want: "--launch"},
 		{name: "explicit false does not confirm", args: []string{"tidy", "--yes=false"}, want: ""},
+		{name: "short explicit false does not confirm", args: []string{"tidy", "-y=false"}, want: ""},
+		{name: "repeated shorthand cluster", args: []string{"tidy", "-yy"}, want: "-yy"},
+		{name: "shorthand cluster ending in y", args: []string{"tidy", "-vy"}, want: "-vy"},
+		{name: "shorthand cluster starting with y", args: []string{"tidy", "-yv"}, want: "-yv"},
+		{name: "cluster with y set false", args: []string{"tidy", "-vy=false"}, want: ""},
+		{name: "cluster without y", args: []string{"tidy", "-vq"}, want: ""},
 		{name: "after terminator is not a flag", args: []string{"tidy", "--", "--yes"}, want: ""},
 		{name: "positional named like a flag value", args: []string{"tidy", "yes"}, want: ""},
 	}
