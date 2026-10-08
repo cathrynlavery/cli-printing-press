@@ -985,15 +985,31 @@ func resolveCommandPositionals(command liveDogfoodCommand, happyArgs []string, a
 	return substitutePositionals(happyArgs, command.Path, resolved), false, "", fixtureSource
 }
 
-func happyPathSyntheticParamFixtureSkip(command liveDogfoodCommand, happyArgs []string) string {
+func happyPathSyntheticParamFixtureSkip(command liveDogfoodCommand, args []string, declared happyArgs) string {
 	if liveDogfoodCommandMutates(command) {
 		return ""
 	}
-	if !happyArgsContainSyntheticFlagPlaceholder(happyArgs, command.Path) &&
-		!happyArgsContainSyntheticPositionalPlaceholder(happyArgs, command.Path) {
+	if !happyArgsContainSyntheticFlagPlaceholder(args, command.Path) &&
+		!happyArgsContainSyntheticPositionalPlaceholder(args, command.Path) &&
+		!happyArgsDeclareFixtureBlockedFlag(declared) {
 		return ""
 	}
 	return reasonRequiredParamFixture
+}
+
+// happyArgsDeclareFixtureBlockedFlag reports whether an explicit pp:happy-args
+// flag carries a placeholder literal. Example-derived placeholders only count
+// on id/token/key-shaped flags because an ordinary Example value such as
+// `--query example-value` can still pass; an author-declared placeholder is a
+// deliberate "no portable fixture exists" statement (continuation cursors,
+// account-specific paths, resource URLs), so it counts on any flag.
+func happyArgsDeclareFixtureBlockedFlag(declared happyArgs) bool {
+	for i := 0; i+1 < len(declared.flags); i += 2 {
+		if liveDogfoodSyntheticExampleValue(declared.flags[i+1]) {
+			return true
+		}
+	}
+	return false
 }
 
 func liveDogfoodSyntheticPositionalValue(happyArgs, commandPath []string, position, positionalCount int) bool {
@@ -1756,7 +1772,7 @@ func runLiveDogfoodCommand(command liveDogfoodCommand, ctx resolveCtx) []LiveDog
 	resolvedArgs, resolveSkipped, resolveReason, fixtureSource := resolveCommandPositionals(command, happyArgs, len(parsedHappyArgs.positionals), ctx)
 	syntheticParamSkip := ""
 	if fixtureSkip == "" && !resolveSkipped {
-		syntheticParamSkip = happyPathSyntheticParamFixtureSkip(command, resolvedArgs)
+		syntheticParamSkip = happyPathSyntheticParamFixtureSkip(command, resolvedArgs, parsedHappyArgs)
 	}
 	switch {
 	case bodyFixtureSkip != "":
