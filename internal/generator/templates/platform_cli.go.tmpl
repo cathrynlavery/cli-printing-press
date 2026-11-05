@@ -74,13 +74,16 @@ func validateRegisteredPlatformSourceProfile(source platform.SourceProfile) erro
 	if err := validateRegisteredPlatformSourceProfileWithReferences(source, references); err != nil {
 		return err
 	}
-	if len(references) == 0 {
+	if !source.RequiresCredentialResolver() {
 		return nil
 	}
 	return requirePlatformCredentialResolverFactory()
 }
 
 func validateRegisteredPlatformSourceProfileWithReferences(source platform.SourceProfile, references map[string]string) error {
+	if err := source.Validate(); err != nil {
+		return err
+	}
 	if registeredPlatformSource == nil {
 		return nil
 	}
@@ -121,7 +124,7 @@ func platformCredentialResolver(source platform.SourceProfile) (platform.Credent
 	if err := validateRegisteredPlatformSourceProfileWithReferences(source, references); err != nil {
 		return nil, err
 	}
-	if len(references) == 0 {
+	if !source.RequiresCredentialResolver() {
 		return nil, nil
 	}
 	if err := requirePlatformCredentialResolverFactory(); err != nil {
@@ -430,9 +433,9 @@ type platformSourceFlags struct {
 }
 
 func (values *platformSourceFlags) addFlags(command *cobra.Command) {
-	command.Flags().StringVar(&values.credentialRef, "credential-ref", "", "Credential reference")
-	command.Flags().StringVar(&values.usernameRef, "username-ref", "", "Username reference")
-	command.Flags().StringToStringVar(&values.additionalCredentialRef, "additional-credential-ref", nil, "Named credential references (name=reference)")
+	command.Flags().StringVar(&values.credentialRef, "credential-ref", "", "Credential reference (env:NAME or provider reference)")
+	command.Flags().StringVar(&values.usernameRef, "username-ref", "", "Username reference (env:NAME or provider reference)")
+	command.Flags().StringToStringVar(&values.additionalCredentialRef, "additional-credential-ref", nil, "Named env:NAME or provider credential references (name=reference)")
 	command.Flags().StringVar(&values.expectedAccountID, "expected-account-id", "", "Trusted immutable provider account ID")
 	command.Flags().StringVar(&values.expectedOrgName, "expected-org-name", "", "Exact expected organization name")
 	command.Flags().StringVar(&values.expectedStoreID, "expected-store-id", "", "Trusted immutable Shopify store ID")

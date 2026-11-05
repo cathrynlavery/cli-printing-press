@@ -25,6 +25,7 @@ import (
 const ProfileSchemaVersion = 1
 
 var profileNamePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,62}$`)
+var environmentReferencePattern = regexp.MustCompile(`^env:[A-Za-z_][A-Za-z0-9_]*$`)
 
 // Profile is the cross-source, non-secret client configuration shared by
 // participating printed CLIs.
@@ -117,6 +118,13 @@ func (p *Profile) Validate() error {
 }
 
 func (s SourceProfile) Validate() error {
+	for name, ref := range s.References() {
+		if strings.HasPrefix(ref, "env:") {
+			if err := validateEnvironmentReference(ref); err != nil {
+				return fmt.Errorf("%s: %w", name, err)
+			}
+		}
+	}
 	for name, ref := range s.AdditionalCredentialRefs {
 		if strings.TrimSpace(name) == "" {
 			return errors.New("additional credential reference name may not be empty")
@@ -143,6 +151,16 @@ func (s SourceProfile) References() map[string]string {
 		refs[name] = ref
 	}
 	return refs
+}
+
+// RequiresCredentialResolver reports whether any reference needs a provider resolver.
+func (s SourceProfile) RequiresCredentialResolver() bool {
+	for _, ref := range s.References() {
+		if !strings.HasPrefix(ref, "env:") {
+			return true
+		}
+	}
+	return false
 }
 
 func (s SourceProfile) ExpectedIdentity() map[string]string {
@@ -447,13 +465,39 @@ func kindRoot(envName string, platformDefault func() (string, error), homeFallba
 	return filepath.Join(userHome, homeFallback, "printing-press"), nil
 }
 
+// Environment references are resolved only in memory, at the point of use.
+func resolveCredentialReference(ctx context.Context, resolver CredentialResolver, ref string) ([]byte, error) {
+	if strings.HasPrefix(ref, "env:") {
+		if err := validateEnvironmentReference(ref); err != nil {
+			return nil, err
+		}
+		name := strings.TrimPrefix(ref, "env:")
+		value := os.Getenv(name)
+		if value == "" {
+			return nil, fmt.Errorf("credential environment variable %s is unset or empty", name)
+		}
+		return []byte(value), nil
+	}
+	if resolver == nil {
+		return nil, errors.New("credential resolver is required for credential references")
+	}
+	return resolver.Resolve(ctx, ref)
+}
+
+func validateEnvironmentReference(ref string) error {
+	if !environmentReferencePattern.MatchString(ref) {
+		return errors.New("environment credential reference must be env:NAME with a valid environment variable name")
+	}
+	return nil
+}
+
 func resolveCredentials(ctx context.Context, resolver CredentialResolver, source SourceProfile) (ResolvedCredentials, error) {
 	refs := source.References()
 	resolved := make(ResolvedCredentials, len(refs))
 	if len(refs) == 0 {
 		return resolved, nil
 	}
-	if resolver == nil {
+	if resolver == nil && source.RequiresCredentialResolver() {
 		return nil, errors.New("credential resolver is required for credential references")
 	}
 	keys := make([]string, 0, len(refs))
@@ -462,7 +506,7 @@ func resolveCredentials(ctx context.Context, resolver CredentialResolver, source
 	}
 	sort.Strings(keys)
 	for _, key := range keys {
-		value, err := resolver.Resolve(ctx, refs[key])
+		value, err := resolveCredentialReference(ctx, resolver, refs[key])
 		if err != nil {
 			resolved.Zero()
 			return nil, fmt.Errorf("resolve %s reference: %w", key, err)

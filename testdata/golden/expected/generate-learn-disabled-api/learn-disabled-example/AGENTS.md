@@ -48,12 +48,15 @@ Use exactly one of `auto`, `local`, `live`, or `computed`. Keep `auto` when the 
 Normal API authentication is separate from optional platform-source credential
 resolution. If this CLI uses indirect references for a tenant-gated platform
 source, add the downstream registration in a preserved hand-authored file
-under `internal/cli/` and provide both `CredentialResolverFactory` and
-`ValidateSourceProfile` on `platformSourceRegistration` for any selected source
-that has references. A source with no references may omit both hooks and receives
-an empty credential map. Keep reference values opaque to shared profile code,
-validate only the selected source in the downstream hook, and never persist
-resolved credential bytes. Do not edit generator-owned `internal/platform`
+under `internal/cli/` and provide `ValidateSourceProfile` on
+`platformSourceRegistration` for any selected source that has references.
+The shared runtime resolves `env:NAME` references from non-empty environment
+variables at use time; accept those references in the downstream validator while
+keeping all provider identity assertions. Other references also require
+`CredentialResolverFactory` and stay opaque to shared profile code. A source with
+no references may omit both hooks and receives an empty credential map. Validate
+only the selected source in the downstream hook, and never persist resolved
+credential bytes. Do not edit generator-owned `internal/platform`
 packages; a reprint refreshes those files while retaining the downstream
 registration file.
 
